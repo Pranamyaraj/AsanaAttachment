@@ -1,32 +1,51 @@
-const asana = require('asana');
-
-const client = new asana.Client({ accessToken: process.env.ASANA_TOKEN });
-const PROJECT_ID = '1211436029323043';
-const PARENT_TASK_ID = '1211436036352183'; 
-async function checkParentTasks() {
+import 'dotenv/config';
+import Asana from 'asana';
+const ASANA_PERSONAL_ACCESS_TOKEN = process.env.ASANA_PAT;
+const PROJECT_GID = process.env.ASANA_PROJECT_GID;
+const CHECK_INTERVAL_MS = 50000;
+const client = Asana.Client.create().useAccessToken(ASANA_PERSONAL_ACCESS_TOKEN);
+const approvedTasks = new Set();
+const checkParentTasksForAttachments = async () => {
+    if (!ASANA_PERSONAL_ACCESS_TOKEN || !PROJECT_GID) {
+        console.error("Error: ASANA_PAT or ASANA_PROJECT_GID is not set in the .env file.");
+        return;
+    }
+//    console.log(`[${new Date().toLocaleTimeString()}] Fetching all project tasks...`);
     try {
-        console.log("Checking tasks in project:", PROJECT_ID);
-        const tasks = await client.tasks.getTasksForProject(PROJECT_ID, { opt_fields: 'name,completed,assignee,parent' });
-        for (let task of tasks.data) {
-            const taskId = task.gid;
-            const taskData = await client.tasks.getTask(taskId, { opt_fields: 'completed,name,assignee,parent' });
-            const attachments = await client.attachments.getAttachmentsForObject(taskId);
-            if (taskData.completed && attachments.data.length === 0) {
-                console.log(`Task '${taskData.name}' completed with NO attachments.`);
-                await client.tasks.updateTask(taskId, { completed: false });
-                await client.tasks.addComment(taskId, {
-                    text: "Please attach the required file before marking this task as complete."
-                });
-                console.log(`Task '${taskData.name}' reverted and comment added.`)
-                if (taskData.parent) {
-                    await client.tasks.updateTask(taskData.parent.gid, { completed: false });
-                    console.log(`Parent task '${taskData.parent.name}' reverted as well.`);
+        const result = await client.tasks.findByProject(PROJECT_GID, {
+            opt_fields: 'name,completed,num_subtasks',
+        });
+        const allTasks = result.data;
+        if (allTasks.length === 0) {
+            console.log("... Project has no tasks.");
+            return;
+        }
+        for (const task of allTasks) {
+            if (!task.completed && approvedTasks.has(task.gid)) {
+                approvedTasks.delete(task.gid);
+            }
+            if (task.completed && task.num_subtasks > 0 && !approvedTasks.has(task.gid)) {
+                console.log(`Completed parent task: "${task.name}"`);
+                const attachments = await client.attachments.findByTask(task.gid, {});
+                if (attachments.data.length === 0) {
+                    console.log(`"${task.name}" has no attachment so, PREVENT completion.`);
+                    await client.tasks.update(task.gid, {
+                        completed: false,
+                    });
+                    await client.stories.createOnTask(task.gid, {
+                        text: "parent completion, prevent completion without attachment",
+                    });
+                } else {
+                    console.log(`"${task.name}" has attachments.COMPLETED.`);
+                    approvedTasks.add(task.gid);
                 }
             }
         }
-        console.log("Check complete.");
-    } catch (err) {
-        console.error(err);
+        //console.log("...Check completed.");
+
+    } catch (error) {
+        console.error("An error occurred with the Asana API:", error);
     }
-}
-checkParentTasks();
+};
+checkParentTasksForAttachments();
+setInterval(checkParentTasksForAttachments, CHECK_INTERVAL_MS);
